@@ -435,7 +435,9 @@ def main():
         parser.print_help()
         return
 
-    conf = load_conf(args[0])
+    conf = {}
+    for arg in args:
+        conf.update(load_conf(arg))
     update_conf(conf, opts)
 
     loglevel = conf.get("log_level", 3)
