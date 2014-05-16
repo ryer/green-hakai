@@ -5,7 +5,7 @@ Loadtest for Web applications.
 """
 from __future__ import print_function, division
 
-__version__ = '0.4dev'
+__version__ = '0.4dev-gottani'
 
 import gevent.pool
 import geventhttpclient.client
@@ -33,6 +33,7 @@ SUCC = FAIL = 0
 STOP = False
 PATH_TIME = PATH_CNT = None
 
+PLUGINS = []
 
 class AddressConnectionPool(ConnectionPool):
     addresses = []
@@ -62,6 +63,23 @@ geventhttpclient.client.ConnectionPool = AddressConnectionPool
 MIMETYPE_FORM = 'application/x-www-form-urlencoded'
 MIMETYPE_JSON = 'application/json'
 
+"""
+プラグインモジュールのimportを行います。
+"""
+def load_plugins(conf):
+    import imp
+    import traceback
+
+    for p in conf.get('plugins', []):
+        if p.get('file'):
+            plugin_path = os.path.join(conf['BASEDIR'], p['file'])
+            sys.path.append(os.path.dirname(plugin_path))
+        try:
+            (file, pathname, description) = imp.find_module(p['name'])
+            PLUGINS.append(imp.load_module(p['name'], file, pathname, description))
+        except Exception as ex:
+            error("Failed to load plugin(%s)", p['name'])
+            error(traceback.format_exc())
 
 # 実行中に ... って表示する.
 class Indicator(object):
@@ -90,6 +108,22 @@ def load_conf(filename):
     import yaml
     conf = yaml.load(open(filename))
     conf.setdefault('BASEDIR', basedir)
+
+    if conf.get('actions'):
+        # actionのloop展開
+        def _pp_actions(actions, act):
+            import copy
+            if act.get('loop'):
+                for i in range(0, act['loop']):
+                    for subact in act['actions']:
+                        _pp_actions(actions, subact)
+            else:
+                actions.append(copy.deepcopy(act))
+        _actions = []
+        for act in conf['actions']:
+            _pp_actions(_actions, act)
+        conf['actions'] = _actions
+
     return conf
 
 def _load_vars(conf, name):
@@ -172,33 +206,140 @@ class Action(object):
         self.action = action
         self.method = action.get('method', 'GET')
         self.path = action['path']
+        self.path_name = action.get('path_name')
         #: 全リクエストに付与するクエリー文字列
         self.query_params = conf.get('query_params', {}).items()
         self.headers = conf.get('headers', {})
         self.content = action.get('content')
         self.content_type = action.get('content_type')
-        self.post_params = action.get('post_params')
-        self._scan_exp = None
-        scan = action.get('scan')
-        if scan:
-            self._scan_r = re.compile(scan)
+
+        # 全リクエストに付与するPOSTパラメータ
+        self.post_params = None
+        if conf.get('post_params'):
+            self.post_params = conf.get('post_params').copy()
+        if action.get('post_params'):
+            if self.post_params:
+                self.post_params.update( action.get('post_params'))
+            else:
+                self.post_params = action.get('post_params')
+
+        # 正規表現による変数キャプチャ
+        if action.get('scan'):
+            self._scan_r = []
+            for (k, v) in action.get('scan').items():
+                self._scan_r.append((k, re.compile(v)))
         else:
             self._scan_r = None
 
-    def _scan(self, response_body, vs):
-        u"""conf['scan'] で指定された正規表現でチェック&変数キャプチャする"""
-        if not self._scan_r:
-            return True
-        m = self._scan_r.search(response_body)
-        if not m:
-            return False
-        vs.update(m.groupdict(''))
-        return True
+        # JSONからの変数キャプチャ
+        if action.get('scan_jsons'):
+            self.scan_jsons = action.get('scan_jsons').items()
+        else:
+            self.scan_jsons = None
 
-    def _replace_names(self, s, v, _sub_name=re.compile('%\((.+?)\)%').sub):
-        return _sub_name(lambda m: v[m.group(1)], s)
+        # アクションのガード条件
+        if action.get('condition'):
+            self.condition = action.get('condition')
+        else:
+            self.condition = None
+
+        # 変数生成定義
+        if action.get('setvars'):
+            self.setvars = action.get('setvars').items()
+        else:
+            self.setvars = None
+
+        # アサーション定義
+        if action.get('assertions'):
+            self.assertions = action.get('assertions').items()
+        else:
+            self.assertions = None
+
+    # 指定された正規表現で変数キャプチャする
+    def _scan(self, response_body, vars_):
+        if not self._scan_r:
+            return
+        for (k, v) in self._scan_r:
+            m = v.search(response_body)
+            if m:
+                vars_[k] = m.group(1)
+                info("success in scan(%s) = %s", k, vars_[k])
+            else:
+                info("failed to regexp scan(%s)", k)
+
+    # 指定されたキー定義で変数キャプチャする
+    def _scan_jsons(self, response_body, vars_):
+        import json
+        if not self.scan_jsons:
+            return
+        vars_['json'] = json.loads(response_body)
+        for (k, v) in self.scan_jsons:
+            try:
+                vars_[k] = self._replace_names(v, vars_, True)
+                info("success in scan_jsons(%s) = %s", k, str(vars_[k])[:100])
+            except Exception as ex:
+                info("failed to eval scan_jsons(%s): %s", k, ex)
+        vars_['json'] = None
+
+    # 新しい変数の作成
+    def _setvars(self, vars_):
+        if not self.setvars:
+            return
+        for (k, v) in self.setvars:
+            try:
+                vars_[k] = self._replace_names(v, vars_, True)
+                info("success in setvars(%s) = %s", k, vars_[k])
+            except Exception as ex:
+                info("failed to eval setvars(%s): %s", k, ex)
+
+    # 処理結果の最終アサーション
+    def _assertion(self, vars_):
+        if not self.assertions:
+            return False
+        for (k, v) in self.assertions:
+            try:
+                if self._replace_names(v, vars_, True):
+                    info("success in assertion(%s)", k)
+                    return False
+                else:
+                    info("error in assertion(%s)", k)
+                    return True
+            except Exception as ex:
+                info("failed to eval assertion(%s): %s", k, ex)
+                return True
+
+    # アクションの実行ガード条件チェック
+    def _check_condition_torun(self, vars_):
+        if not self.condition:
+            return True
+        if not self._replace_names(self.condition, vars_, True):
+            info("condition(" + self.condition + ") is false, skip.")
+            return False
+        else:
+            info("condition(" + self.condition + ") is true")
+            return True
+
+    # "%(..)%"があった場合はevalによる実行時置換を行う。forceの場合は無条件でevalする。
+    def _replace_names(self, s, v, force=False, _sub_name=re.compile('%\((.+?)\)%').subn):
+        (s2, subs) = _sub_name(lambda m: "v.get('%s')" % (m.group(1)), s)
+        if subs or force:
+            try:
+                return eval(s2)
+            except SyntaxError:
+                warn("Syntax error found: %s", s)
+                return s
+        else:
+            return s
 
     def execute(self, client, vars_):
+        info("execute self.path =====>> %s", self.path)
+
+        for p in PLUGINS:
+            p.pre_action(self, client, vars_)
+
+        if not self._check_condition_torun(vars_):
+            return True
+
         u"""1アクションの実行
 
         リダイレクトを処理するのでリクエストは複数回実行する
@@ -207,6 +348,9 @@ class Action(object):
         #: path - 変数展開前のURL
         #: この path ごとに集計を行う.
         path = self.path
+        #: path_name がついている場合はそれを別名として使う
+        if self.path_name:
+            path = self.path_name
         query_params = [(k, self._replace_names(v, vars_))
                         for (k, v) in self.query_params]
         header = self.headers.copy()
@@ -214,7 +358,7 @@ class Action(object):
             header[k] = self._replace_names(header[k], vars_)
 
         #: realpath - 変数展開した実際にアクセスするURL
-        real_path = self._replace_names(path, vars_)
+        real_path = self._replace_names(self.path, vars_)
 
         if method == 'POST' and self.content is not None:
             body = self._replace_names(self.content, vars_)
@@ -284,12 +428,27 @@ class Action(object):
             else:
                 path = real_path = frag.path
 
+        has_assert_error = False
+
         if timeout:
             succ = False
-        elif not (response and response.status_code // 10 == 20):
+        elif not response:
+            succ = False
+        elif not response.status_code // 10 == 20:
             succ = False
         else:
-            succ = self._scan(response_body, vars_)
+            succ = True
+            if response['content-type'].startswith(MIMETYPE_JSON):
+                self._scan_jsons(response_body, vars_)
+            else:
+                self._scan(response_body, vars_)
+            self._setvars(vars_)
+            if self._assertion(vars_):
+                has_assert_error = True
+                succ = False
+
+        for p in reversed(PLUGINS):
+            succ = p.post_action(self, client, vars_, response, succ)
 
         if succ:
             global SUCC
@@ -303,8 +462,11 @@ class Action(object):
             FAIL += 1
             ng()
             if response:
-                warn("(%.2f[ms]) %s %s",
-                     t*1000, response.status_code, response_body)
+                if has_assert_error:
+                    warn("\nassert: time=%.2f[ms] path=%s", t*1000, path)
+                else:
+                    warn("(%.2f[ms]) %s %s",
+                         t*1000, response.status_code, response_body)
             elif timeout:
                 warn("\ntimeout: time=%.2f[sec] url=%s", t, path)
             else:
@@ -378,6 +540,7 @@ def run_hakai(conf, all_vars):
     PATH_TIME = defaultdict(int)
     PATH_CNT = defaultdict(int)
 
+    load_plugins(conf)
     logging.getLogger().setLevel(conf['log_level'] * 10)
 
     addresslist = conf.get('addresslist')
