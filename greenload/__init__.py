@@ -207,6 +207,9 @@ class Action(object):
         #: path - 変数展開前のURL
         #: この path ごとに集計を行う.
         path = self.path
+        #: path_name がついている場合はそれを別名として使う
+        if self.path_name:
+            path = self.path_name
         query_params = [(k, self._replace_names(v, vars_))
                         for (k, v) in self.query_params]
         header = self.headers.copy()
@@ -214,7 +217,7 @@ class Action(object):
             header[k] = self._replace_names(header[k], vars_)
 
         #: realpath - 変数展開した実際にアクセスするURL
-        real_path = self._replace_names(path, vars_)
+        real_path = self._replace_names(self.path, vars_)
 
         if method == 'POST' and self.content is not None:
             body = self._replace_names(self.content, vars_)
