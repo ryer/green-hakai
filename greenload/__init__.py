@@ -343,7 +343,7 @@ def make_exvars(ex):
 
 
 def make_parser():
-    parser = OptionParser(usage="%prog [options] config.yml")
+    parser = OptionParser(usage="%prog [options] config.yml ...")
     parser.add_option('-f', '--fork', type='int')
     parser.add_option('-c', '--max-request', type='int')
     parser.add_option('-n', '--loop', type='int')
@@ -441,7 +441,9 @@ def main():
         parser.print_help()
         return
 
-    conf = load_conf(args[0])
+    conf = {}
+    for arg in args:
+        conf.update(load_conf(arg))
     update_conf(conf, opts)
 
     logging.getLogger().setLevel(conf['log_level'] * 10)
