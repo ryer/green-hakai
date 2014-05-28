@@ -22,6 +22,7 @@ import urllib
 import urlparse
 import random
 from gevent import socket
+import zlib
 
 
 debug = logging.debug
@@ -427,6 +428,10 @@ class Action(object):
                 path = real_path = '%s?%s' % (frag.path, frag.query)
             else:
                 path = real_path = frag.path
+
+        if response and response.get('content-encoding') == 'gzip':
+            info('Content-Encoding: gzip')
+            response_body = zlib.decompress(response_body, 16+zlib.MAX_WBITS)
 
         has_assert_error = False
 
