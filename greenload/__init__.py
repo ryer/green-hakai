@@ -23,6 +23,7 @@ import urlparse
 import random
 from gevent import socket
 import zlib
+import json
 
 
 debug = logging.debug
@@ -270,7 +271,6 @@ class Action(object):
 
     # 指定されたキー定義で変数キャプチャする
     def _scan_jsons(self, response_body, vars_):
-        import json
         if not self.scan_jsons:
             return
         vars_['json'] = json.loads(response_body)
