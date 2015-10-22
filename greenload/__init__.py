@@ -267,6 +267,7 @@ class Action(object):
                 vars_[k] = m.group(1)
                 info("success in scan(%s) = %s", k, vars_[k])
             else:
+                del vars_[k]
                 info("failed to regexp scan(%s)", k)
 
     # 指定されたキー定義で変数キャプチャする
