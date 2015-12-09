@@ -562,6 +562,8 @@ def run_hakai(conf, all_vars):
             connection_timeout=timeout,
             network_timeout=timeout,
             headers={'User-Agent': user_agent},
+            insecure=True,
+            ssl_options=dict(cert_reqs=False),
             )
 
     vars_ = all_vars[0], all_vars[1], make_exvars(all_vars[2])
