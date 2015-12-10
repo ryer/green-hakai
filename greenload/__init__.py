@@ -239,6 +239,12 @@ class Action(object):
         else:
             self.scan_jsons = None
 
+        # レスポンスヘッダから変数キャプチャ
+        if action.get('scan_response'):
+            self.scan_response = action.get('scan_response').items()
+        else:
+            self.scan_response = None
+
         # アクションのガード条件
         if action.get('condition'):
             self.condition = action.get('condition')
@@ -282,6 +288,17 @@ class Action(object):
             except Exception as ex:
                 info("failed to eval scan_jsons(%s): %s", k, ex)
         vars_['json'] = None
+
+    # 指定されたレスポンスヘッダを変数キャプチャする
+    def _scan_response(self, response, vars_):
+        if not self.scan_response:
+            return
+        for (k, v) in self.scan_response:
+            try:
+                vars_[k] = response[v]
+                info("success in scan_response(%s) = %s", k, str(vars_[k])[:100])
+            except Exception as ex:
+                info("failed to fetch response(%s): %s", k, ex)
 
     # 新しい変数の作成
     def _setvars(self, vars_):
@@ -335,6 +352,7 @@ class Action(object):
 
     def execute(self, client, vars_):
         info("execute self.path =====>> %s", self.path)
+        force_succ = False
 
         for p in PLUGINS:
             p.pre_action(self, client, vars_)
@@ -418,6 +436,11 @@ class Action(object):
             if response.status_code // 10 != 30:  # isn't redirect
                 break
 
+            if not response['location'].startswith(self.conf['domain']): # other domain
+                info("Redirect to other domain: " + response['location'])
+                force_succ = True
+                break
+
             # handle redirects.
             debug("(%.2f[ms]) %s location=%s", t*1000,
                   response.status_code, response['location'])
@@ -436,7 +459,9 @@ class Action(object):
 
         has_assert_error = False
 
-        if timeout:
+        if force_succ:
+            succ = True
+        elif timeout:
             succ = False
         elif not response:
             succ = False
@@ -444,6 +469,9 @@ class Action(object):
             succ = False
         else:
             succ = True
+
+        if succ:
+            self._scan_response(response, vars_)
             if response['content-type'].startswith(MIMETYPE_JSON):
                 self._scan_jsons(response_body, vars_)
             else:
